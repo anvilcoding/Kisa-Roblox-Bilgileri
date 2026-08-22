@@ -1,0 +1,273 @@
+-- ServerScriptService icine Script olarak koyun.
+-- Bu surum YouTube ders anlatimi icin bolumlere ayrilmistir.
+
+-- =========================================================
+-- BOLUM 1: Servisler ve temel ayarlar
+-- =========================================================
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local REMOTE_NAME = "AntiCheatClientReport"
+local MAX_SPEED_MULTIPLIER = 1.85
+local MAX_TELEPORT_DISTANCE = 90
+local MAX_AIR_TIME = 4.5
+local MAX_NOCLIP_HITS = 3
+local VIOLATION_LIMIT = 100
+local VIOLATION_DECAY = 4
+local CHECK_INTERVAL = 0.15
+
+-- =========================================================
+-- BOLUM 2: RemoteEvent kurulumu
+-- =========================================================
+local clientReportEvent = ReplicatedStorage:FindFirstChild(REMOTE_NAME)
+
+if not clientReportEvent then
+	clientReportEvent = Instance.new("RemoteEvent")
+	clientReportEvent.Name = REMOTE_NAME
+	clientReportEvent.Parent = ReplicatedStorage
+end
+
+-- =========================================================
+-- BOLUM 3: Oyuncu takip verisi
+-- =========================================================
+local playerData = {}
+
+local function isCharacterReady(character)
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+
+	if not humanoid or not rootPart then
+		return false, nil, nil
+	end
+
+	if humanoid.Health <= 0 then
+		return false, humanoid, rootPart
+	end
+
+	return true, humanoid, rootPart
+end
+
+local function isMovementStateAllowed(humanoid)
+	local state = humanoid:GetState()
+
+	return state == Enum.HumanoidStateType.Swimming
+		or state == Enum.HumanoidStateType.Climbing
+		or state == Enum.HumanoidStateType.Seated
+		or state == Enum.HumanoidStateType.PlatformStanding
+end
+
+-- =========================================================
+-- BOLUM 4: Ihlal puani ve geri alma sistemi
+-- =========================================================
+local function addViolation(player, amount, reason)
+	local data = playerData[player]
+	if not data then
+		return
+	end
+
+	data.violations += amount
+	warn(("[AntiCheat] %s +%.0f violation: %s | total=%.1f"):format(player.Name, amount, reason, data.violations))
+
+	if data.lastSafeCFrame and player.Character and player.Character.PrimaryPart then
+		player.Character:PivotTo(data.lastSafeCFrame)
+	end
+
+	if data.violations >= VIOLATION_LIMIT then
+		player:Kick("Anti-cheat: Supheli hareket veya exploit algilandi.")
+	end
+end
+
+local function decayViolations(data, deltaTime)
+	data.violations = math.max(0, data.violations - VIOLATION_DECAY * deltaTime)
+end
+
+-- =========================================================
+-- BOLUM 5: Hiz hilesi ve teleport kontrolu
+-- =========================================================
+local function checkSpeedAndTeleport(player, data, humanoid, lastPosition, currentPosition, elapsed)
+	local distance = (currentPosition - lastPosition).Magnitude
+	local horizontalDistance = (
+		Vector3.new(currentPosition.X, 0, currentPosition.Z)
+		- Vector3.new(lastPosition.X, 0, lastPosition.Z)
+	).Magnitude
+
+	local speed = horizontalDistance / elapsed
+	local allowedSpeed = math.max(humanoid.WalkSpeed, 16) * MAX_SPEED_MULTIPLIER + 8
+
+	if speed > allowedSpeed then
+		addViolation(player, 14, ("Speed %.1f > %.1f"):format(speed, allowedSpeed))
+	end
+
+	if distance > MAX_TELEPORT_DISTANCE then
+		addViolation(player, 20, ("Teleport distance %.1f"):format(distance))
+	end
+end
+
+-- =========================================================
+-- BOLUM 6: Ucma hilesi kontrolu
+-- =========================================================
+local function checkFly(player, data, humanoid, rootPart, elapsed)
+	if humanoid.FloorMaterial == Enum.Material.Air then
+		data.airTime = (data.airTime or 0) + elapsed
+
+		if data.airTime > MAX_AIR_TIME and math.abs(rootPart.AssemblyLinearVelocity.Y) < 12 then
+			addViolation(player, 16, "Fly veya havada asili kalma supheli")
+		end
+	else
+		data.airTime = 0
+	end
+end
+
+-- =========================================================
+-- BOLUM 7: Noclip / duvar icinden gecme kontrolu
+-- =========================================================
+local function hasWallBetween(character, fromPosition, toPosition)
+	local direction = toPosition - fromPosition
+
+	if direction.Magnitude < 2 then
+		return false
+	end
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.FilterDescendantsInstances = { character }
+	rayParams.IgnoreWater = true
+
+	local result = workspace:Raycast(fromPosition, direction, rayParams)
+
+	if not result then
+		return false
+	end
+
+	if not result.Instance.CanCollide then
+		return false
+	end
+
+	return true
+end
+
+local function checkNoclip(player, data, character, lastPosition, currentPosition)
+	if hasWallBetween(character, lastPosition, currentPosition) then
+		data.noclipHits = (data.noclipHits or 0) + 1
+
+		if data.noclipHits >= MAX_NOCLIP_HITS then
+			addViolation(player, 18, "Noclip veya duvar icinden gecme supheli")
+		end
+	else
+		data.noclipHits = 0
+	end
+end
+
+-- =========================================================
+-- BOLUM 8: Karakter kurulumu ve Humanoid deger korumasi
+-- =========================================================
+local function setupCharacter(player, character)
+	local ready, humanoid, rootPart = isCharacterReady(character)
+	if not ready then
+		return
+	end
+
+	playerData[player] = playerData[player] or {}
+	playerData[player].lastPosition = rootPart.Position
+	playerData[player].lastSafeCFrame = rootPart.CFrame
+	playerData[player].lastCheck = os.clock()
+	playerData[player].airTime = 0
+	playerData[player].noclipHits = 0
+	playerData[player].violations = math.max(playerData[player].violations or 0, 0)
+
+	humanoid:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+		if humanoid.WalkSpeed > 32 then
+			addViolation(player, 12, "WalkSpeed client tarafinda yuksek ayarlandi")
+		end
+	end)
+
+	humanoid:GetPropertyChangedSignal("JumpPower"):Connect(function()
+		if humanoid.UseJumpPower and humanoid.JumpPower > 85 then
+			addViolation(player, 10, "JumpPower client tarafinda yuksek ayarlandi")
+		end
+	end)
+
+	humanoid:GetPropertyChangedSignal("JumpHeight"):Connect(function()
+		if not humanoid.UseJumpPower and humanoid.JumpHeight > 12 then
+			addViolation(player, 10, "JumpHeight client tarafinda yuksek ayarlandi")
+		end
+	end)
+end
+
+-- =========================================================
+-- BOLUM 9: Client raporlarini dusuk agirlikli sinyal olarak alma
+-- =========================================================
+clientReportEvent.OnServerEvent:Connect(function(player, reportType, value)
+	if typeof(reportType) ~= "string" then
+		return
+	end
+
+	if reportType == "SuspiciousHumanoidValue" then
+		addViolation(player, 6, "Client supheli Humanoid degeri raporladi: " .. tostring(value))
+	elseif reportType == "ClientHeartbeatMissing" then
+		addViolation(player, 4, "Client heartbeat gecikmesi raporladi")
+	end
+end)
+
+-- =========================================================
+-- BOLUM 10: Oyuncu giris/cikis baglantilari
+-- =========================================================
+local function trackPlayer(player)
+	playerData[player] = { violations = 0 }
+
+	player.CharacterAdded:Connect(function(character)
+		task.wait(1)
+		setupCharacter(player, character)
+	end)
+
+	if player.Character then
+		setupCharacter(player, player.Character)
+	end
+end
+
+local function untrackPlayer(player)
+	playerData[player] = nil
+end
+
+Players.PlayerAdded:Connect(trackPlayer)
+Players.PlayerRemoving:Connect(untrackPlayer)
+
+for _, player in ipairs(Players:GetPlayers()) do
+	trackPlayer(player)
+end
+
+-- =========================================================
+-- BOLUM 11: Ana Heartbeat dongusu
+-- =========================================================
+RunService.Heartbeat:Connect(function(deltaTime)
+	for player, data in pairs(playerData) do
+		local character = player.Character
+		local ready, humanoid, rootPart = isCharacterReady(character)
+
+		if ready and data.lastPosition and os.clock() - (data.lastCheck or 0) >= CHECK_INTERVAL then
+			local now = os.clock()
+			local elapsed = math.max(now - data.lastCheck, CHECK_INTERVAL)
+			local lastPosition = data.lastPosition
+			local currentPosition = rootPart.Position
+			local movementIsSpecial = isMovementStateAllowed(humanoid)
+
+			if not movementIsSpecial then
+				checkSpeedAndTeleport(player, data, humanoid, lastPosition, currentPosition, elapsed)
+				checkFly(player, data, humanoid, rootPart, elapsed)
+				checkNoclip(player, data, character, lastPosition, currentPosition)
+			else
+				data.airTime = 0
+				data.noclipHits = 0
+			end
+
+			if humanoid.FloorMaterial ~= Enum.Material.Air and not movementIsSpecial and data.violations <= 35 then
+				data.lastSafeCFrame = rootPart.CFrame
+			end
+
+			decayViolations(data, deltaTime)
+			data.lastPosition = currentPosition
+			data.lastCheck = now
+		end
+	end
+end)

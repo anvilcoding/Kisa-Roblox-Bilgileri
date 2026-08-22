@@ -1,0 +1,91 @@
+-- StarterPlayer > StarterPlayerScripts icine LocalScript olarak koyun.
+-- Bu dosya tek basina guvenlik karari vermez; server'a yardimci sinyal uretir.
+
+-- =========================================================
+-- BOLUM 1: Servisler ve client ayarlari
+-- =========================================================
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local LOCAL_PLAYER = Players.LocalPlayer
+local REMOTE_NAME = "AntiCheatClientReport"
+local MAX_LOCAL_WALKSPEED = 32
+local MAX_LOCAL_JUMPPOWER = 85
+local MAX_LOCAL_JUMPHEIGHT = 12
+local REPORT_COOLDOWN = 1.5
+
+-- =========================================================
+-- BOLUM 2: RemoteEvent ve rapor spam korumasi
+-- =========================================================
+local reportEvent = ReplicatedStorage:WaitForChild(REMOTE_NAME)
+local lastReportTimes = {}
+local currentHumanoid = nil
+
+local function report(reportType, value)
+	local now = os.clock()
+
+	if lastReportTimes[reportType] and now - lastReportTimes[reportType] < REPORT_COOLDOWN then
+		return
+	end
+
+	lastReportTimes[reportType] = now
+	reportEvent:FireServer(reportType, value)
+end
+
+-- =========================================================
+-- BOLUM 3: Humanoid hareket degerlerini kontrol etme
+-- =========================================================
+local function checkHumanoidValues(humanoid)
+	if humanoid.WalkSpeed > MAX_LOCAL_WALKSPEED then
+		report("SuspiciousHumanoidValue", "WalkSpeed=" .. tostring(humanoid.WalkSpeed))
+	end
+
+	if humanoid.UseJumpPower and humanoid.JumpPower > MAX_LOCAL_JUMPPOWER then
+		report("SuspiciousHumanoidValue", "JumpPower=" .. tostring(humanoid.JumpPower))
+	end
+
+	if not humanoid.UseJumpPower and humanoid.JumpHeight > MAX_LOCAL_JUMPHEIGHT then
+		report("SuspiciousHumanoidValue", "JumpHeight=" .. tostring(humanoid.JumpHeight))
+	end
+end
+
+-- =========================================================
+-- BOLUM 4: Karakter yuklenince event baglantilari
+-- =========================================================
+local function setupCharacter(character)
+	currentHumanoid = character:WaitForChild("Humanoid", 10)
+
+	if not currentHumanoid then
+		return
+	end
+
+	checkHumanoidValues(currentHumanoid)
+
+	currentHumanoid:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+		checkHumanoidValues(currentHumanoid)
+	end)
+
+	currentHumanoid:GetPropertyChangedSignal("JumpPower"):Connect(function()
+		checkHumanoidValues(currentHumanoid)
+	end)
+
+	currentHumanoid:GetPropertyChangedSignal("JumpHeight"):Connect(function()
+		checkHumanoidValues(currentHumanoid)
+	end)
+end
+
+-- =========================================================
+-- BOLUM 5: Client tarafinda hafif tekrar kontrol
+-- =========================================================
+LOCAL_PLAYER.CharacterAdded:Connect(setupCharacter)
+
+if LOCAL_PLAYER.Character then
+	setupCharacter(LOCAL_PLAYER.Character)
+end
+
+RunService.RenderStepped:Connect(function()
+	if currentHumanoid then
+		checkHumanoidValues(currentHumanoid)
+	end
+end)
